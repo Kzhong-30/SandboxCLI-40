@@ -123,6 +123,10 @@ class ComparisonItemSchema(BaseModel):
     avg_sentiment: float = Field(description="平均情感得分")
     sentiment_distribution: dict = Field(description="情感分布")
     top_keywords: List[dict] = Field(description="热门关键词")
+    wordcloud_image_base64: Optional[str] = Field(
+        default=None,
+        description="关键词云图片PNG的Base64编码，可直接用于 <img src='data:image/png;base64,...'>",
+    )
 
 
 class ComparisonResponseSchema(BaseModel):

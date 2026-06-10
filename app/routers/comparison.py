@@ -10,7 +10,7 @@ router = APIRouter(prefix="/compare", tags=["竞品对比分析"])
     "",
     response_model=ComparisonResponseSchema,
     summary="多品牌竞品对比分析",
-    description="输入多个品牌关键词，返回对比分析报告，包括声量、情感分布和关键词云",
+    description="输入多个品牌关键词，返回对比分析报告，包括声量、情感分布和关键词云可视化图片",
 )
 async def compare_keywords(
     keywords: List[str] = Query(
@@ -19,9 +19,17 @@ async def compare_keywords(
         description="要对比的品牌关键词列表（至少2个）",
     ),
     days: int = Query(7, ge=1, le=90, description="统计的时间范围（天）"),
+    generate_wordcloud: bool = Query(
+        True,
+        description="是否生成关键词云可视化图片（Base64编码PNG），关闭可加快响应",
+    ),
 ):
     if len(keywords) < 2:
         raise HTTPException(status_code=400, detail="至少需要提供2个关键词进行对比")
 
-    report = await ComparisonService.compare_keywords(keywords, days=days)
+    report = await ComparisonService.compare_keywords(
+        keywords,
+        days=days,
+        generate_image=generate_wordcloud,
+    )
     return report

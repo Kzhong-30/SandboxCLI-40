@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Callable
 from datetime import datetime
 from copy import deepcopy
 import re
@@ -8,49 +8,62 @@ class MockCursor:
     def __init__(self, documents: List[dict]):
         self._docs = documents
         self._index = 0
-        self._sort_key = None
-        self._sort_order = 1
-        self._skip = 0
-        self._limit = None
+        self._sort_spec: Optional[List[Tuple[str, int]]] = None
+        self._skip_n = 0
+        self._limit_n: Optional[int] = None
 
-    def sort(self, key, order=1):
-        self._sort_key = key
-        self._sort_order = order
+    def sort(self, key_or_list: Any, direction: int = 1):
+        if isinstance(key_or_list, list):
+            self._sort_spec = [(k, d) for k, d in key_or_list]
+        else:
+            self._sort_spec = [(key_or_list, direction)]
         return self
 
     def skip(self, n: int):
-        self._skip = n
+        self._skip_n = n
         return self
 
     def limit(self, n: int):
-        self._limit = n
+        self._limit_n = n
         return self
 
-    async def to_list(self, length: int = None) -> List[dict]:
+    def _apply_operations(self) -> List[dict]:
         docs = deepcopy(self._docs)
-        if self._sort_key:
-            reverse = self._sort_order == -1
-            if isinstance(self._sort_key, list):
-                key, order = self._sort_key[0]
-                reverse = order == -1
-                docs.sort(key=lambda x: x.get(key) if x.get(key) is not None else "", reverse=reverse)
-            else:
-                docs.sort(key=lambda x: x.get(self._sort_key) if x.get(self._sort_key) is not None else "", reverse=reverse)
-        if self._skip:
-            docs = docs[self._skip:]
-        if self._limit:
-            docs = docs[:self._limit]
+        if self._sort_spec:
+            for sort_key, sort_dir in reversed(self._sort_spec):
+                reverse = sort_dir == -1
+
+                def get_sort_val(d: dict, k: str) -> Any:
+                    v = d.get(k)
+                    if v is None:
+                        return ""
+                    return v
+
+                docs.sort(
+                    key=lambda x: get_sort_val(x, sort_key),
+                    reverse=reverse,
+                )
+        if self._skip_n > 0:
+            docs = docs[self._skip_n:]
+        if self._limit_n is not None:
+            docs = docs[:self._limit_n]
+        return docs
+
+    async def to_list(self, length: int = None) -> List[dict]:
+        docs = self._apply_operations()
         if length:
             docs = docs[:length]
         return docs
 
     def __aiter__(self):
+        self._cached = self._apply_operations()
+        self._index = 0
         return self
 
     async def __anext__(self):
-        if self._index >= len(self._docs):
+        if self._index >= len(self._cached):
             raise StopAsyncIteration
-        item = self._docs[self._index]
+        item = self._cached[self._index]
         self._index += 1
         return item
 
@@ -76,6 +89,86 @@ class MockAggregationCursor:
         return item
 
 
+def _resolve_field(doc: dict, field_ref: Any) -> Any:
+    if isinstance(field_ref, str) and field_ref.startswith("$"):
+        field_name = field_ref[1:]
+        return doc.get(field_name)
+    return field_ref
+
+
+def _eval_expression(doc: dict, expr: Any) -> Any:
+    if isinstance(expr, str) and expr.startswith("$"):
+        return _resolve_field(doc, expr)
+    if isinstance(expr, dict):
+        for op, args in expr.items():
+            if op == "$cond":
+                if_expr, true_expr, false_expr = args
+                cond_result = _eval_expression(doc, if_expr)
+                if cond_result:
+                    return _eval_expression(doc, true_expr)
+                else:
+                    return _eval_expression(doc, false_expr)
+            elif op == "$eq":
+                a = _eval_expression(doc, args[0])
+                b = _eval_expression(doc, args[1])
+                return a == b
+            elif op == "$ne":
+                a = _eval_expression(doc, args[0])
+                b = _eval_expression(doc, args[1])
+                return a != b
+            elif op == "$gt":
+                a = _eval_expression(doc, args[0])
+                b = _eval_expression(doc, args[1])
+                return a is not None and b is not None and a > b
+            elif op == "$gte":
+                a = _eval_expression(doc, args[0])
+                b = _eval_expression(doc, args[1])
+                return a is not None and b is not None and a >= b
+            elif op == "$lt":
+                a = _eval_expression(doc, args[0])
+                b = _eval_expression(doc, args[1])
+                return a is not None and b is not None and a < b
+            elif op == "$lte":
+                a = _eval_expression(doc, args[0])
+                b = _eval_expression(doc, args[1])
+                return a is not None and b is not None and a <= b
+            elif op == "$concat":
+                parts = []
+                for a in args:
+                    v = _eval_expression(doc, a)
+                    parts.append(str(v) if v is not None else "")
+                return "".join(parts)
+            elif op == "$sum":
+                if isinstance(args, int) or isinstance(args, float):
+                    return args
+                v = _eval_expression(doc, args)
+                return v if isinstance(v, (int, float)) else 0
+            elif op == "$avg":
+                v = _eval_expression(doc, args)
+                return v if isinstance(v, (int, float)) else None
+            elif op == "$push":
+                return _eval_expression(doc, args)
+            elif op == "$year":
+                v = _eval_expression(doc, args)
+                return v.year if isinstance(v, datetime) else None
+            elif op == "$month":
+                v = _eval_expression(doc, args)
+                return v.month if isinstance(v, datetime) else None
+            elif op == "$dayOfMonth":
+                v = _eval_expression(doc, args)
+                return v.day if isinstance(v, datetime) else None
+            elif op == "$hour":
+                v = _eval_expression(doc, args)
+                return v.hour if isinstance(v, datetime) else None
+            elif op == "$minute":
+                v = _eval_expression(doc, args)
+                return v.minute if isinstance(v, datetime) else None
+            elif op == "$second":
+                v = _eval_expression(doc, args)
+                return v.second if isinstance(v, datetime) else None
+    return expr
+
+
 def _match_condition(doc: dict, condition: dict) -> bool:
     for key, value in condition.items():
         if key == "$or":
@@ -84,180 +177,262 @@ def _match_condition(doc: dict, condition: dict) -> bool:
         elif key == "$and":
             if not all(_match_condition(doc, sub) for sub in value):
                 return False
+        elif key == "$nor":
+            if any(_match_condition(doc, sub) for sub in value):
+                return False
         elif isinstance(value, dict):
             doc_val = doc.get(key)
+            matched = True
             for op, op_val in value.items():
                 if op == "$gte":
-                    if not (doc_val is not None and doc_val >= op_val):
-                        return False
+                    if doc_val is None or not (doc_val >= op_val):
+                        matched = False
                 elif op == "$gt":
-                    if not (doc_val is not None and doc_val > op_val):
-                        return False
+                    if doc_val is None or not (doc_val > op_val):
+                        matched = False
                 elif op == "$lte":
-                    if not (doc_val is not None and doc_val <= op_val):
-                        return False
+                    if doc_val is None or not (doc_val <= op_val):
+                        matched = False
                 elif op == "$lt":
-                    if not (doc_val is not None and doc_val < op_val):
-                        return False
+                    if doc_val is None or not (doc_val < op_val):
+                        matched = False
                 elif op == "$eq":
                     if doc_val != op_val:
-                        return False
+                        matched = False
                 elif op == "$ne":
                     if doc_val == op_val:
-                        return False
+                        matched = False
+                elif op == "$in":
+                    if doc_val not in op_val:
+                        matched = False
+                elif op == "$nin":
+                    if doc_val in op_val:
+                        matched = False
                 elif op == "$regex":
                     if doc_val is None:
-                        return False
-                    pattern = op_val
-                    flags = 0
-                    if "$options" in value:
-                        if "i" in value["$options"]:
-                            flags = re.IGNORECASE
-                    try:
-                        if not re.search(pattern.pattern if hasattr(pattern, 'pattern') else str(pattern), str(doc_val), flags):
-                            return False
-                    except Exception:
-                        return False
+                        matched = False
+                    else:
+                        try:
+                            flags = 0
+                            if "$options" in value and "i" in value["$options"]:
+                                flags = re.IGNORECASE
+                            pattern = op_val.pattern if hasattr(op_val, "pattern") else str(op_val)
+                            if not re.search(pattern, str(doc_val), flags):
+                                matched = False
+                        except Exception:
+                            matched = False
+                elif op == "$exists":
+                    exists = key in doc
+                    if bool(op_val) != exists:
+                        matched = False
+                if not matched:
+                    break
+            if not matched:
+                return False
         else:
-            if doc.get(key) != value:
+            if key not in doc or doc.get(key) != value:
                 return False
     return True
 
 
+def _build_group_key(doc: dict, group_id_spec: Any) -> Tuple[Tuple, dict]:
+    if group_id_spec is None:
+        return (("__all__",), {})
+    if isinstance(group_id_spec, str) and group_id_spec.startswith("$"):
+        field = group_id_spec[1:]
+        v = doc.get(field)
+        key = (str(v),)
+        return (key, {field: v})
+    if isinstance(group_id_spec, dict):
+        key_parts = []
+        key_dict = {}
+        for k, expr in group_id_spec.items():
+            v = _eval_expression(doc, expr)
+            key_parts.append(repr(v))
+            key_dict[k] = v
+        return (tuple(key_parts), key_dict)
+    return ((str(group_id_spec),), {"_id_value": group_id_spec})
+
+
 def _run_aggregation(docs: List[dict], pipeline: List[dict]) -> List[dict]:
     result = deepcopy(docs)
+
     for stage in pipeline:
         for op, params in stage.items():
+
             if op == "$match":
                 result = [d for d in result if _match_condition(d, params)]
+
             elif op == "$group":
-                groups: Dict[str, dict] = {}
-                group_id_spec = params.get("_id", None)
+                groups: Dict[Tuple, dict] = {}
+                group_id_spec = params.get("_id")
+
+                accumulator_specs = {
+                    field: expr for field, expr in params.items() if field != "_id"
+                }
+
                 for doc in result:
-                    if isinstance(group_id_spec, dict):
-                        key_parts = []
-                        for k, expr in group_id_spec.items():
-                            if isinstance(expr, dict):
-                                for op_k, op_v in expr.items():
-                                    if op_k.startswith("$"):
-                                        field = op_v.replace("$", "")
-                                        val = doc.get(field)
-                                        if isinstance(val, datetime):
-                                            if op_k == "$year":
-                                                key_parts.append(str(val.year))
-                                            elif op_k == "$month":
-                                                key_parts.append(str(val.month))
-                                            elif op_k == "$dayOfMonth":
-                                                key_parts.append(str(val.day))
-                                            elif op_k == "$hour":
-                                                key_parts.append(str(val.hour))
-                            else:
-                                key_parts.append(str(doc.get(expr.replace("$", ""), "")))
-                        key = "|".join(key_parts)
+                    key_tuple, key_dict = _build_group_key(doc, group_id_spec)
+
+                    if key_tuple not in groups:
+                        new_group: dict = {"_id": key_dict if key_dict else None}
+                        for field, expr in accumulator_specs.items():
+                            for agg_op, agg_arg in expr.items():
+                                if agg_op == "$sum":
+                                    if isinstance(agg_arg, (int, float)):
+                                        new_group[field] = agg_arg
+                                    else:
+                                        val = _eval_expression(doc, agg_arg)
+                                        new_group[field] = val if isinstance(val, (int, float)) else 0
+                                elif agg_op == "$avg":
+                                    vals = []
+                                    val = _eval_expression(doc, agg_arg)
+                                    if val is not None:
+                                        vals.append(val)
+                                    new_group[f"__{field}__values__"] = vals
+                                    new_group[field] = 0
+                                elif agg_op == "$push":
+                                    arr = []
+                                    val = _eval_expression(doc, agg_arg)
+                                    if val is not None:
+                                        arr.append(val)
+                                    new_group[field] = arr
+                                elif agg_op == "$first":
+                                    new_group[field] = _eval_expression(doc, agg_arg)
+                                elif agg_op == "$last":
+                                    new_group[field] = _eval_expression(doc, agg_arg)
+                                elif agg_op == "$max":
+                                    new_group[field] = _eval_expression(doc, agg_arg)
+                                elif agg_op == "$min":
+                                    new_group[field] = _eval_expression(doc, agg_arg)
+                        groups[key_tuple] = new_group
                     else:
-                        key = str(doc.get(group_id_spec.replace("$", ""), "") if group_id_spec else "all")
-
-                    if key not in groups:
-                        group_data = {"_id": {}}
-                        if isinstance(group_id_spec, dict):
-                            idx = 0
-                            for k, expr in group_id_spec.items():
-                                if isinstance(expr, dict):
-                                    for op_k, op_v in expr.items():
-                                        field = op_v.replace("$", "")
-                                        val = doc.get(field)
-                                        if isinstance(val, datetime):
-                                            if op_k == "$year":
-                                                group_data["_id"][k] = val.year
-                                            elif op_k == "$month":
-                                                group_data["_id"][k] = val.month
-                                            elif op_k == "$dayOfMonth":
-                                                group_data["_id"][k] = val.day
-                                            elif op_k == "$hour":
-                                                group_data["_id"][k] = val.hour
-                                idx += 1
-
-                        for field, expr in params.items():
-                            if field == "_id":
-                                continue
-                            if isinstance(expr, dict):
-                                for agg_op in expr:
-                                    if agg_op == "$sum":
-                                        if agg_op == "$sum":
-                                            val = expr[agg_op]
-                                            if isinstance(val, int) or isinstance(val, float):
-                                                group_data[field] = val
-                                            elif isinstance(val, dict):
-                                                for cond_op, cond_val in val.items():
-                                                    if cond_op == "$cond":
-                                                        if_expr, true_val, false_val = cond_val
-                                                        ok = False
-                                                        if isinstance(if_expr, list):
-                                                            eq_op, eq_vals = if_expr[0], if_expr[1:]
-                                                            if eq_op == "$eq":
-                                                                doc_v1 = eq_vals[0]
-                                                                doc_v2 = eq_vals[1]
-                                                                if isinstance(doc_v1, str) and doc_v1.startswith("$"):
-                                                                    doc_v1 = doc.get(doc_v1[1:])
-                                                                if isinstance(doc_v2, str) and doc_v2.startswith("$"):
-                                                                    doc_v2 = doc.get(doc_v2[1:])
-                                                                ok = doc_v1 == doc_v2
-                                                        if ok:
-                                                            if isinstance(true_val, int):
-                                                                group_data[field] = group_data.get(field, 0) + true_val
-                                                        else:
-                                                            if isinstance(false_val, int):
-                                                                group_data[field] = group_data.get(field, 0) + false_val
-                                                        break
-                                    elif agg_op == "$avg":
-                                        field_val = expr[agg_op].replace("$", "")
-                                        vals = groups.get(key, {}).get(f"__{field}__", [])
-                                        vals.append(doc.get(field_val))
-                                        group_data[f"__{field}__"] = vals
-                                    elif agg_op == "$push":
-                                        push_val = expr[agg_op]
-                                        if isinstance(push_val, dict):
-                                            for concat_op, concat_fields in push_val.items():
-                                                if concat_op == "$concat":
-                                                    parts = []
-                                                    for f in concat_fields:
-                                                        if isinstance(f, str) and f.startswith("$"):
-                                                            parts.append(str(doc.get(f[1:], "")))
-                                                        else:
-                                                            parts.append(str(f))
-                                                    push_result = "".join(parts)
-                                                    break
-                                            arr = group_data.get(field, [])
-                                            arr.append(push_result)
-                                            group_data[field] = arr
-
-                        if field not in group_data:
-                            pass
-                    groups[key] = group_data
+                        g = groups[key_tuple]
+                        for field, expr in accumulator_specs.items():
+                            for agg_op, agg_arg in expr.items():
+                                if agg_op == "$sum":
+                                    if isinstance(agg_arg, (int, float)):
+                                        g[field] = g.get(field, 0) + agg_arg
+                                    else:
+                                        val = _eval_expression(doc, agg_arg)
+                                        if isinstance(val, (int, float)):
+                                            g[field] = g.get(field, 0) + val
+                                elif agg_op == "$avg":
+                                    val = _eval_expression(doc, agg_arg)
+                                    if val is not None:
+                                        g[f"__{field}__values__"].append(val)
+                                elif agg_op == "$push":
+                                    val = _eval_expression(doc, agg_arg)
+                                    if val is not None:
+                                        g[field].append(val)
+                                elif agg_op == "$last":
+                                    g[field] = _eval_expression(doc, agg_arg)
+                                elif agg_op == "$max":
+                                    curr = g.get(field)
+                                    new_val = _eval_expression(doc, agg_arg)
+                                    if curr is None or (new_val is not None and new_val > curr):
+                                        g[field] = new_val
+                                elif agg_op == "$min":
+                                    curr = g.get(field)
+                                    new_val = _eval_expression(doc, agg_arg)
+                                    if curr is None or (new_val is not None and new_val < curr):
+                                        g[field] = new_val
 
                 final_groups = []
-                for key, gdata in groups.items():
-                    clean_gdata = {}
+                for key_tuple, gdata in groups.items():
+                    clean = {}
                     for f, v in gdata.items():
-                        if f.startswith("__") and f.endswith("__"):
-                            real_field = f[2:-2]
-                            if v:
-                                clean_gdata[real_field] = sum(filter(None, v)) / len([x for x in v if x is not None]) if [x for x in v if x is not None] else 0
+                        if f.startswith("__") and f.endswith("__values__"):
+                            real_field = f[2:-10]
+                            vals = v
+                            if vals:
+                                clean[real_field] = sum(vals) / len(vals)
                         else:
-                            clean_gdata[f] = v
-                    final_groups.append(clean_gdata)
+                            clean[f] = v
+                    final_groups.append(clean)
                 result = final_groups
+
             elif op == "$sort":
-                sort_key = list(params.keys())[0]
-                order = params[sort_key]
-                result.sort(key=lambda x: x.get("_id", {}).get(sort_key, x.get(sort_key, "")) if isinstance(x.get("_id"), dict) else x.get("_id", ""), reverse=(order == -1))
+                sort_items = list(params.items())
+                for sort_key, sort_dir in reversed(sort_items):
+                    reverse = sort_dir == -1
+
+                    def get_val(d: dict, sk: str) -> Any:
+                        parts = sk.split(".")
+                        cur = d
+                        for p in parts:
+                            if isinstance(cur, dict):
+                                cur = cur.get(p)
+                            else:
+                                return ""
+                        return cur if cur is not None else ""
+
+                    result.sort(
+                        key=lambda x: get_val(x, sort_key),
+                        reverse=reverse,
+                    )
+
+            elif op == "$project":
+                new_result = []
+                for doc in result:
+                    projected = {}
+                    keep_id = True
+                    for field, spec in params.items():
+                        if field == "_id":
+                            keep_id = bool(spec) if isinstance(spec, (int, bool)) else True
+                            if keep_id:
+                                projected["_id"] = _eval_expression(doc, spec) if isinstance(spec, (dict, str)) else doc.get("_id")
+                        elif isinstance(spec, (int, bool)):
+                            if bool(spec) and field in doc:
+                                projected[field] = doc[field]
+                        else:
+                            projected[field] = _eval_expression(doc, spec)
+                    if keep_id and "_id" not in projected and "_id" in doc:
+                        projected["_id"] = doc["_id"]
+                    new_result.append(projected)
+                result = new_result
+
+            elif op == "$limit":
+                n = params
+                if isinstance(n, int):
+                    result = result[:n]
+
+            elif op == "$skip":
+                n = params
+                if isinstance(n, int):
+                    result = result[n:]
+
+            elif op == "$lookup":
+                pass
+
+            elif op == "$unwind":
+                new_result = []
+                field_path = params if isinstance(params, str) else params.get("path")
+                if field_path and field_path.startswith("$"):
+                    field = field_path[1:]
+                    for doc in result:
+                        arr = doc.get(field)
+                        if isinstance(arr, list) and arr:
+                            for item in arr:
+                                nd = deepcopy(doc)
+                                nd[field] = item
+                                new_result.append(nd)
+                        else:
+                            new_result.append(doc)
+                    result = new_result
+
+            elif op == "$count":
+                if isinstance(params, str):
+                    result = [{params: len(result)}]
+                else:
+                    result = [{"count": len(result)}]
+
     return result
 
 
 class MockCollection:
     def __init__(self):
         self._documents: List[dict] = []
-        self._counter = 0
 
     def _new_id(self):
         from bson import ObjectId
@@ -280,10 +455,21 @@ class MockCollection:
             ids.append(d["_id"])
         return type("InsertManyResult", (), {"inserted_ids": ids})()
 
-    async def find_one(self, query: dict) -> Optional[dict]:
+    async def find_one(self, query: dict, projection: dict = None) -> Optional[dict]:
         for doc in self._documents:
             if _match_condition(doc, query):
-                return deepcopy(doc)
+                if projection is None:
+                    return deepcopy(doc)
+                projected = {}
+                keep_id = True
+                for field, spec in projection.items():
+                    if field == "_id":
+                        keep_id = bool(spec) if isinstance(spec, (int, bool)) else True
+                    elif isinstance(spec, (int, bool)) and bool(spec) and field in doc:
+                        projected[field] = doc[field]
+                if keep_id and "_id" in doc:
+                    projected["_id"] = doc["_id"]
+                return projected
         return None
 
     def find(
@@ -296,13 +482,27 @@ class MockCollection:
     ) -> MockCursor:
         if query is None:
             query = {}
-        docs = [d for d in self._documents if _match_condition(d, query)]
+        docs = []
+        for d in self._documents:
+            if _match_condition(d, query):
+                if projection is None:
+                    docs.append(d)
+                else:
+                    projected = {}
+                    keep_id = True
+                    for field, spec in projection.items():
+                        if field == "_id":
+                            keep_id = bool(spec) if isinstance(spec, (int, bool)) else True
+                        elif isinstance(spec, (int, bool)) and bool(spec) and field in d:
+                            projected[field] = d[field]
+                    if keep_id and "_id" in d:
+                        projected["_id"] = d["_id"]
+                    docs.append(projected)
         cursor = MockCursor(docs)
         if sort is not None:
             if isinstance(sort, list) and len(sort) > 0:
-                key, order = sort[0]
-                cursor.sort(key, order)
-            else:
+                cursor.sort(sort)
+            elif isinstance(sort, str):
                 cursor.sort(sort)
         if skip > 0:
             cursor.skip(skip)
@@ -315,49 +515,111 @@ class MockCollection:
             query = {}
         return sum(1 for d in self._documents if _match_condition(d, query))
 
+    async def estimated_document_count(self) -> int:
+        return len(self._documents)
+
     async def update_one(self, query: dict, update: dict) -> Any:
-        matched_count = 0
-        modified_count = 0
+        matched = 0
+        modified = 0
         for doc in self._documents:
             if _match_condition(doc, query):
-                matched_count = 1
+                matched = 1
                 if "$set" in update:
                     for k, v in update["$set"].items():
                         doc[k] = v
-                    modified_count = 1
+                    modified = 1
+                if "$inc" in update:
+                    for k, v in update["$inc"].items():
+                        if k in doc and isinstance(doc[k], (int, float)) and isinstance(v, (int, float)):
+                            doc[k] += v
+                            modified = 1
+                if "$unset" in update:
+                    for k in update["$unset"]:
+                        if k in doc:
+                            del doc[k]
+                            modified = 1
+                if "$push" in update:
+                    for k, v in update["$push"].items():
+                        if k in doc and isinstance(doc[k], list):
+                            doc[k].append(v)
+                            modified = 1
                 break
-        return type("UpdateResult", (), {"matched_count": matched_count, "modified_count": modified_count})()
+        return type("UpdateResult", (), {"matched_count": matched, "modified_count": modified})()
 
     async def update_many(self, query: dict, update: dict) -> Any:
-        matched_count = 0
-        modified_count = 0
+        matched = 0
+        modified = 0
         for doc in self._documents:
             if _match_condition(doc, query):
-                matched_count += 1
+                matched += 1
                 if "$set" in update:
                     for k, v in update["$set"].items():
                         doc[k] = v
-                    modified_count += 1
-        return type("UpdateResult", (), {"matched_count": matched_count, "modified_count": modified_count})()
+                    modified += 1
+        return type("UpdateResult", (), {"matched_count": matched, "modified_count": modified})()
 
     async def delete_one(self, query: dict) -> Any:
-        deleted_count = 0
+        deleted = 0
         for i, doc in enumerate(self._documents):
             if _match_condition(doc, query):
                 del self._documents[i]
-                deleted_count = 1
+                deleted = 1
                 break
-        return type("DeleteResult", (), {"deleted_count": deleted_count})()
+        return type("DeleteResult", (), {"deleted_count": deleted})()
 
     async def delete_many(self, query: dict) -> Any:
         original_len = len(self._documents)
         self._documents = [d for d in self._documents if not _match_condition(d, query)]
-        deleted_count = original_len - len(self._documents)
-        return type("DeleteResult", (), {"deleted_count": deleted_count})()
+        deleted = original_len - len(self._documents)
+        return type("DeleteResult", (), {"deleted_count": deleted})()
+
+    async def find_one_and_update(self, query: dict, update: dict, return_document: bool = False) -> Optional[dict]:
+        result = await self.update_one(query, update)
+        if result.matched_count > 0:
+            doc = await self.find_one(query)
+            return doc
+        return None
+
+    async def find_one_and_delete(self, query: dict) -> Optional[dict]:
+        doc = await self.find_one(query)
+        if doc:
+            await self.delete_one(query)
+        return doc
+
+    async def replace_one(self, query: dict, replacement: dict) -> Any:
+        matched = 0
+        modified = 0
+        for i, doc in enumerate(self._documents):
+            if _match_condition(doc, query):
+                matched = 1
+                orig_id = doc.get("_id")
+                new_doc = deepcopy(replacement)
+                if orig_id is not None and "_id" not in new_doc:
+                    new_doc["_id"] = orig_id
+                self._documents[i] = new_doc
+                modified = 1
+                break
+        return type("UpdateResult", (), {"matched_count": matched, "modified_count": modified})()
 
     def aggregate(self, pipeline: List[dict]) -> MockAggregationCursor:
         results = _run_aggregation(self._documents, pipeline)
         return MockAggregationCursor(results)
+
+    async def distinct(self, field: str, query: dict = None) -> List[Any]:
+        if query is None:
+            query = {}
+        values = set()
+        for d in self._documents:
+            if _match_condition(d, query):
+                if field in d:
+                    values.add(d[field])
+        return list(values)
+
+    async def create_index(self, keys: Any, unique: bool = False, name: str = None) -> str:
+        return name or str(keys)
+
+    def index_information(self) -> dict:
+        return {}
 
 
 class MockMongoDatabase:
@@ -372,10 +634,29 @@ class MockMongoDatabase:
     def __getattr__(self, name: str) -> MockCollection:
         return self[name]
 
+    async def list_collection_names(self) -> List[str]:
+        return list(self._collections.keys())
+
+    async def create_collection(self, name: str, **kwargs) -> MockCollection:
+        if name not in self._collections:
+            self._collections[name] = MockCollection()
+        return self._collections[name]
+
+    async def drop_collection(self, name_or_coll: Any):
+        name = name_or_coll if isinstance(name_or_coll, str) else getattr(name_or_coll, "name", str(name_or_coll))
+        if name in self._collections:
+            del self._collections[name]
+
+    async def command(self, *args, **kwargs) -> dict:
+        if args and args[0] == "ping":
+            return {"ok": 1.0}
+        return {"ok": 1.0}
+
 
 class MockMongoClient:
     def __init__(self, *args, **kwargs):
         self._databases: Dict[str, MockMongoDatabase] = {}
+        self.admin = MockMongoDatabase()
 
     def __getitem__(self, name: str) -> MockMongoDatabase:
         if name not in self._databases:
@@ -387,3 +668,6 @@ class MockMongoClient:
 
     def close(self):
         pass
+
+    async def server_info(self) -> dict:
+        return {"version": "5.0.0-mock"}
