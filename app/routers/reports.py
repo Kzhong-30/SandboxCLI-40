@@ -1,4 +1,4 @@
-import urllib.parse
+from urllib.parse import quote
 from io import BytesIO
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse, Response
@@ -36,9 +36,11 @@ async def download_report(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"报告生成失败: {str(e)}")
 
-    filename = f"opinion_report_{monitor_id}.pdf"
+    monitor_name = monitor.get("name", "未命名监控")
+    filename = f"舆情分析报告_{monitor_name}_{monitor_id}.pdf"
+    ascii_fallback = f"opinion_report_{monitor_id[:8]}.pdf"
     headers = {
-        "Content-Disposition": f"attachment; filename={filename}",
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}; filename={ascii_fallback}",
     }
     return Response(
         content=pdf_bytes,

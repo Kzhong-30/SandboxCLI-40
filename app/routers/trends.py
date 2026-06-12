@@ -17,7 +17,7 @@ async def get_monitor_trends(
     monitor_id: str,
     time_granularity: str = Query(
         "hour",
-        regex="^(hour|day)$",
+        pattern="^(hour|day)$",
         description="时间粒度：hour(按小时) 或 day(按天)",
     ),
     hours: int = Query(24, ge=1, le=8760, description="查询时间范围（小时）"),

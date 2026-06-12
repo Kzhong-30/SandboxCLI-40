@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .database import connect_to_mongo, close_mongo_connection
 from .scheduler import start_scheduler, stop_scheduler
-from .routers import monitors, trends, comparison, reports, websockets
+from .routers import monitors, trends, comparison, reports, websockets, wordcloud
 
 
 @asynccontextmanager
@@ -67,6 +67,7 @@ app.include_router(trends.router)
 app.include_router(comparison.router)
 app.include_router(reports.router)
 app.include_router(websockets.router)
+app.include_router(wordcloud.router)
 
 
 @app.get(
