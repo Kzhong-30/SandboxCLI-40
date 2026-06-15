@@ -207,13 +207,13 @@ class ComparisonService:
             else:
                 default_freq = {keyword: 100}
                 fallback_terms = [
-                    "market", "trend", "analysis", "product", "review",
-                    "opinion", "discussion", "sentiment", "insight",
-                    "recommendation", "feedback", "rating", "trending",
-                    "popular", "viral", "conversation", "topic",
+                    "热度", "讨论", "评价", "口碑", "推荐",
+                    "关注", "观点", "评论", "舆情", "分析",
+                    "反馈", "趋势", "情绪", "态度", "看法",
+                    "好评", "差评", "热门", "话题", "声量",
                 ]
                 for i, term in enumerate(fallback_terms):
-                    default_freq[term] = max(5, 80 - i * 5)
+                    default_freq[term] = max(5, 80 - i * 4)
                 default_keywords = [
                     {"word": w, "count": c}
                     for w, c in sorted(default_freq.items(), key=lambda x: -x[1])[:15]

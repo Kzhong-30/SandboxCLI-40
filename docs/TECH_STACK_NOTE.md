@@ -17,38 +17,64 @@
 
 ---
 
-## 二、三种替代方案选型对比
+## 二、方案一：Motor（异步 MongoDB 驱动）+ Pydantic v2（数据校验层）
 
-### 方案一：Motor（异步 MongoDB 驱动）+ Pydantic v2（数据校验层）
-
+- **定位**：Mongoose 在 Python 生态中的**直接等效替代**
 - **优点**：与 MongoDB 官方 API 完全对齐，异步非阻塞性能优异，Pydantic v2 提供强类型校验，`arbitrary_types_allowed` 可无缝兼容 `bson.ObjectId`，学习成本低，生态最成熟
 - **缺点**：没有 ODM 的 pre/post 保存钩子（hook），Schema 与存储耦合需手动处理，缺少模型关联查询糖语法
 - **适用场景**：要求高性能、需要复杂聚合管道、希望保留 MongoDB 查询语法灵活性的项目
 - **性能表现**：异步 I/O 与 asyncio 事件循环完美兼容，并发读写 QPS 可达 5000+，单次查询延迟 < 2ms，是三种方案中性能最高的
 - **社区活跃度**：Motor 官方维护，GitHub Stars 2.5k+；Pydantic v2 GitHub Stars 25k+，文档齐全、问题响应快，长期维护有保障
 
-### 方案二：MongoEngine（同步 ODM）+ Marshmallow（数据校验层）
+---
 
+## 三、方案二：MongoEngine（同步 ODM）+ Marshmallow（数据校验层）
+
+- **定位**：Mongoose 在 Python 生态中的**风格最接近替代**
 - **优点**：与 Mongoose API 风格最接近（Schema 定义 + model 方法 + pre_save 钩子），面向对象封装完整，开发者熟悉度高，Marshmallow 支持嵌套校验和自定义规则
 - **缺点**：同步阻塞，与 asyncio 事件循环兼容性差，需在线程池中执行，MongoEngine 维护状态低迷（仅 Bug 修复，无新特性），Marshmallow 与 Pydantic v2 功能重叠造成冗余
 - **适用场景**：团队有 Django ORM / Mongoose 使用习惯、不需要高并发、查询逻辑简单的 CRUD 项目
 - **性能表现**：同步 I/O 会阻塞事件循环，并发性能较差，QPS 约 800-1200，单次查询延迟 10-30ms，需手动包装为 async def + `asyncio.to_thread` 才能与 FastAPI 配合
 - **社区活跃度**：MongoEngine GitHub Stars 4.2k+ 但近年 commit 极少，Marshmallow GitHub Stars 7.5k+ 但与 Pydantic v2 存在功能竞争
 
-### 方案三：SQLAlchemy 2.0 + AsyncPG（切换关系型数据库）
+---
 
+## 四、方案三：SQLAlchemy 2.0 + AsyncPG（切换关系型数据库）
+
+- **定位**：**架构级切换方案，非 Mongoose 等效替代**。该方案彻底从 MongoDB 文档模型切换到 PostgreSQL 关系型数据库，不属于 Mongoose 的「等效替换」范畴，而是存储架构层面的选型调整
 - **优点**：SQLAlchemy 2.0 支持异步表达式语言 + `async/await`，与 Pydantic v2 集成极流畅，强一致性事务支持，类型安全度最高，可使用 Alembic 做数据迁移
 - **缺点**：完全抛弃 MongoDB 文档模型，Mongo 的嵌套文档、数组索引、地理空间索引等特性无法直接使用，聚合管道需改写为 SQL CTE/Window Function，迁移成本最高
 - **适用场景**：数据结构关系明确、需要强 ACID 事务、原需求中的 MongoDB 并非硬性约束的项目
 - **性能表现**：PostgreSQL 对复杂查询优化优于 MongoDB，单表 CRUD 延迟 1-3ms，复杂聚合查询性能稳定，并发 QPS 可达 3000-4000，整体性能介于方案一和方案二之间
 - **社区活跃度**：SQLAlchemy GitHub Stars 10k+，AsyncPG GitHub Stars 6.5k+，均长期活跃维护，文档质量高
 
+### 方案三迁移成本评估
+
+| 成本维度 | 评估 | 说明 |
+|---------|------|------|
+| 数据模型重写 | 高 | 嵌套文档需拆分为关联表，数组索引需改中间表 |
+| 聚合管道改写 | 高 | MongoDB 聚合管道需全部改写为 SQL/ORM 查询 |
+| 索引与优化 | 中 | 需重新设计 B-tree 索引和查询执行计划 |
+| 事务一致性 | 正收益 | PostgreSQL 提供强 ACID 事务，MongoDB 仅多文档事务 |
+| 运维复杂度 | 中 | 关系型数据库运维工具链更成熟 |
+| 团队学习成本 | 中-高 | 需同时掌握 SQLAlchemy ORM 和 SQL 调优 |
+
+### 方案三风险评估
+
+| 风险 | 影响等级 | 缓解措施 |
+|-----|---------|---------|
+| 聚合查询性能下降 | 高 | 复杂报表类查询可保留 MongoDB 做只读副本 |
+| Schema 变更不灵活 | 中 | 利用 PostgreSQL JSONB 字段部分保留文档灵活性 |
+| 迁移周期长 | 中 | 可采用双写策略渐进迁移，先读 PostgreSQL 回源 MongoDB |
+| 现有代码改动大 | 高 | 需重写全部数据访问层，测试覆盖需重做 |
+
 ---
 
-## 三、对比表
+## 五、三种方案对比总表
 
 | 对比维度 | 方案一：Motor + Pydantic v2 | 方案二：MongoEngine + Marshmallow | 方案三：SQLAlchemy 2.0 + AsyncPG |
 |---------|----------------------------|----------------------------------|----------------------------------|
+| **定位** | Mongoose 直接等效替代 | Mongoose 风格最接近替代 | 架构级切换（非等效替代） |
 | **异步支持** | 原生 async/await，完美兼容 asyncio | 同步阻塞，需 `to_thread` 包装 | 原生 async/await，兼容 asyncio |
 | **Pydantic 集成** | 原生支持，ObjectId 可自定义 validator | 需二次转换，存在校验层冗余 | 原生支持，ORM 映射天然流畅 |
 | **API 风格** | 原始 MongoDB 查询语法，灵活度高 | 类 Mongoose ORM 糖语法，上手快 | SQLAlchemy Core / ORM 语法 |
@@ -61,7 +87,7 @@
 
 ---
 
-## 四、本次项目的最终实现
+## 六、本次项目的最终实现
 
 项目最终选用 **方案一：Motor（异步驱动）+ Pydantic v2（数据校验）**，核心原因：
 

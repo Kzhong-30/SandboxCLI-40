@@ -341,13 +341,15 @@ def _run_aggregation(docs: List[dict], pipeline: List[dict]) -> List[dict]:
                 final_groups = []
                 for key_tuple, gdata in groups.items():
                     clean = {}
+                    computed_fields = set()
                     for f, v in gdata.items():
                         if f.startswith("__") and f.endswith("__values__"):
                             real_field = f[2:-10]
                             vals = v
                             if vals:
                                 clean[real_field] = sum(vals) / len(vals)
-                        else:
+                            computed_fields.add(real_field)
+                        elif f not in computed_fields:
                             clean[f] = v
                     final_groups.append(clean)
                 result = final_groups
@@ -357,6 +359,17 @@ def _run_aggregation(docs: List[dict], pipeline: List[dict]) -> List[dict]:
                 for sort_key, sort_dir in reversed(sort_items):
                     reverse = sort_dir == -1
 
+                    def _make_comparable(val):
+                        if isinstance(val, dict):
+                            return tuple(
+                                (k, _make_comparable(val[k]))
+                                for k in sorted(val.keys())
+                            )
+                        elif isinstance(val, list):
+                            return tuple(_make_comparable(v) for v in val)
+                        else:
+                            return val
+
                     def get_val(d: dict, sk: str) -> Any:
                         parts = sk.split(".")
                         cur = d
@@ -365,7 +378,7 @@ def _run_aggregation(docs: List[dict], pipeline: List[dict]) -> List[dict]:
                                 cur = cur.get(p)
                             else:
                                 return ""
-                        return cur if cur is not None else ""
+                        return _make_comparable(cur) if cur is not None else ""
 
                     result.sort(
                         key=lambda x: get_val(x, sort_key),
